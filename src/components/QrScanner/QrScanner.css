@@ -1,0 +1,270 @@
+.qr-scanner {
+  position: relative;
+  width: min(320px, 92vw);
+  aspect-ratio: 320 / 692;
+  border-radius: 36px;
+  overflow: hidden;
+  background: #000;
+  box-shadow:
+    0 0 0 8px #1c1c1e,
+    0 20px 40px rgba(0, 0, 0, 0.35);
+  isolation: isolate;
+}
+
+/* L1: カメラ映像レイヤー */
+.qr-scanner__camera {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  transform: scale(1);
+  filter: blur(0);
+  transition:
+    filter 400ms ease-out,
+    transform 400ms ease-out;
+}
+
+/* 検出中(A/A'/B)は scale(1) を維持し、guide frame の座標計算(mapLocationToRect)と
+   ズレないようにする(ズレるとQRコードの実位置と枠がずれて追従が破綻する)。
+   確定後(D/E)だけ拡大してからぼかすことで、blur の縁が透過して背景色(黒)が
+   透けるハロー([data-phase]境界の抜け)を隠す。 */
+.qr-scanner[data-phase='D'] .qr-scanner__camera,
+.qr-scanner[data-phase='E'] .qr-scanner__camera {
+  filter: blur(6px);
+  transform: scale(1.06);
+}
+
+.qr-scanner__video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.qr-scanner__camera-fallback {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(115deg, #1c1c1e 0 40px, #2c2c2e 40px 80px);
+  background-size: 220% 220%;
+  animation: cameraDrift 6s ease-in-out infinite alternate;
+}
+
+@keyframes cameraDrift {
+  from {
+    background-position: 0% 0%;
+  }
+  to {
+    background-position: 100% 40%;
+  }
+}
+
+/* L2: 検出コードの固定画像レイヤー(状態C以降、コード領域だけを静止画として合成する)。
+   台形(遠近)歪みは JS 側でピクセルに焼き込み済みなので、ここでは単に
+   バウンディングボックスの位置に軸並行で置くだけでよい。 */
+.qr-scanner__snapshot {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* L3: スキャンガイド枠。left/top は枠の中心座標(コードが傾いている場合、
+   軸並行のバウンディングボックスではなく検出した傾きに合わせて回転させる)。 */
+.qr-scanner__frame {
+  position: absolute;
+  z-index: 3;
+  opacity: 1;
+  pointer-events: none;
+  transform-origin: center;
+  transition:
+    left 160ms ease-out,
+    top 160ms ease-out,
+    width 160ms ease-out,
+    height 160ms ease-out,
+    transform 160ms ease-out,
+    opacity 90ms linear;
+}
+
+.qr-scanner__frame[data-hidden='true'] {
+  opacity: 0;
+}
+
+.qr-scanner__frame .corner {
+  position: absolute;
+  width: 22%;
+  height: 22%;
+  min-width: 18px;
+  min-height: 18px;
+  border: 3px solid rgba(255, 255, 255, 0.9);
+}
+
+.corner--tl {
+  top: 0;
+  left: 0;
+  border-right: none;
+  border-bottom: none;
+  border-top-left-radius: 8px;
+}
+
+.corner--tr {
+  top: 0;
+  right: 0;
+  border-left: none;
+  border-bottom: none;
+  border-top-right-radius: 8px;
+}
+
+.corner--bl {
+  bottom: 0;
+  left: 0;
+  border-right: none;
+  border-top: none;
+  border-bottom-left-radius: 8px;
+}
+
+.corner--br {
+  bottom: 0;
+  right: 0;
+  border-left: none;
+  border-top: none;
+  border-bottom-right-radius: 8px;
+}
+
+/* L4: 案内バナー */
+.qr-scanner__banner {
+  position: absolute;
+  z-index: 4;
+  top: max(env(safe-area-inset-top, 16px), 16px);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 84%;
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 13px;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 90ms linear;
+  pointer-events: none;
+}
+
+.qr-scanner__banner[data-visible='true'] {
+  opacity: 1;
+}
+
+/* カメラ許可エラー時の常時表示メッセージ */
+.qr-scanner__camera-warning {
+  position: absolute;
+  z-index: 4;
+  top: max(env(safe-area-inset-top, 16px), 16px);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 78%;
+  padding: 10px 16px;
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* L5: 操作ボタン(懐中電灯) */
+.qr-scanner__torch {
+  position: absolute;
+  z-index: 5;
+  left: 50%;
+  bottom: max(env(safe-area-inset-bottom, 28px), 28px);
+  transform: translateX(-50%);
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(28, 28, 30, 0.55);
+  color: #fff;
+  cursor: pointer;
+}
+
+.qr-scanner__torch svg {
+  width: 22px;
+  height: 22px;
+}
+
+.qr-scanner__torch[data-active='true'] {
+  background: rgba(255, 214, 10, 0.9);
+  color: #1c1c1e;
+}
+
+/* L6: 結果アクションシート */
+.qr-scanner__sheet {
+  position: absolute;
+  z-index: 6;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 20px 20px max(env(safe-area-inset-bottom, 20px), 20px);
+  border-radius: 20px 20px 0 0;
+  background: rgba(28, 28, 30, 0.88);
+  backdrop-filter: blur(16px);
+  color: #fff;
+  transform: translateY(100%);
+  transition: transform 160ms ease-out;
+}
+
+.qr-scanner__sheet[data-open='true'] {
+  transform: translateY(0);
+}
+
+.qr-scanner__sheet-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.qr-scanner__sheet-header svg {
+  width: 16px;
+  height: 16px;
+}
+
+.qr-scanner__sheet-body {
+  margin: 12px 0 16px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 15px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.qr-scanner__sheet-actions {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.qr-scanner__sheet-action {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 12px 0;
+  font-size: 16px;
+  text-align: left;
+  color: #0a84ff;
+  text-decoration: none;
+  cursor: pointer;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.qr-scanner__sheet-cancel {
+  appearance: none;
+  width: 100%;
+  margin-top: 12px;
+  padding: 12px 0;
+  border: none;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #0a84ff;
+  font-size: 16px;
+  cursor: pointer;
+}
