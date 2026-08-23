@@ -13,3 +13,15 @@
   color: var(--text);
   text-align: center;
 }
+
+/* SP時はスキャナーを画面いっぱいに表示するため、説明文の余白を持たせない */
+@media (max-width: 480px) {
+  .page {
+    width: 100%;
+    gap: 0;
+  }
+
+  .page__hint {
+    display: none;
+  }
+}
