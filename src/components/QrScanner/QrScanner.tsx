@@ -65,10 +65,12 @@ const SNAPSHOT_PADDING_SCALE = 1.0;
 // スキャンガイド枠(L3)を検出QRコードの四隅から重心を保ったまま広げる倍率。
 const GUIDE_PADDING_SCALE = 1.05;
 
-// ガイド枠(L3)の追従を滑らかにする指数移動平均の重み。
-// jsQR の4隅検出はティックごとに微妙にブレるため、そのまま反映すると枠がカクつく。
-// 1に近いほど追従が速く(ブレやすく)、0に近いほど滑らか(遅延大)。
-const GUIDE_SMOOTHING = 0.35;
+// ガイド枠(L3)の追従を滑らかにする指数平滑の時定数(秒)。
+// jsQR の4隅検出は150msごとにしか更新されずブレも含むため、CSSのtransitionには
+// 頼らず(iOS Safari 等でSVGの d 属性のtransitionが効かない機種があるため)、
+// requestAnimationFrame で毎フレーム連続的にこの時定数で目標へ近づける。
+// 小さいほど追従が速く(ブレやすく)、大きいほど滑らか(遅延大)。
+const GUIDE_FOLLOW_TAU_SECONDS = 0.08;
 
 // ガイド枠(L3)の角ブラケットの長さ(各辺に対する比率、最小px)。
 const GUIDE_CORNER_RATIO = 0.22;
@@ -202,11 +204,10 @@ function lerpPoint(a: Point, b: Point, alpha: number): Point {
   return { x: a.x + (b.x - a.x) * alpha, y: a.y + (b.y - a.y) * alpha };
 }
 
-// 前回のガイド四隅(prev)から今回の検出(next)へ、頂点ごとに指数移動平均で
-// 滑らかに近づける。角度という単一値を経由しないため、台形のまま
-// (実際のパース歪みに沿ったまま)ジッターだけを抑えられる。
-function smoothQuad(prev: Quad | null, next: Quad, alpha: number): Quad {
-  if (!prev) return next;
+// 表示中の四隅(prev)を目標の四隅(next)へ、頂点ごとに alpha だけ近づける。
+// 角度という単一値を経由しないため、台形のまま(実際のパース歪みに沿ったまま)
+// 滑らかに追従させられる。
+function lerpQuad(prev: Quad, next: Quad, alpha: number): Quad {
   return {
     tl: lerpPoint(prev.tl, next.tl, alpha),
     tr: lerpPoint(prev.tr, next.tr, alpha),
@@ -243,7 +244,6 @@ function QrScanner() {
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraError, setCameraError] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
-  const [torchSupported, setTorchSupported] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [detectedQuad, setDetectedQuad] = useState<Quad | null>(null);
   const [resultText, setResultText] = useState("");
@@ -266,13 +266,16 @@ function QrScanner() {
   const snapshotCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastSeenAtRef = useRef(0);
   const pendingTextRef = useRef("");
-  // captureSnapshot 用に、平滑化・パディング前の生の4隅座標を保持する。
-  // ガイド枠(L3)は平滑化・パディング後の Quad を表示に使うが、
+  // captureSnapshot 用に、パディング前の生の4隅座標を保持する。
+  // ガイド枠(L3)は目標(パディング後)へ滑らかに追従させた Quad を表示に使うが、
   // 固定画像(L2)は本物の台形(パース)歪みに正確に沿わせたいため、
   // ここは加工されていない座標が必要。
   const detectedQuadRef = useRef<Quad | null>(null);
-  // ガイド枠(L3)の平滑化用に直前の(表示用)Quadを保持する。
-  const smoothedQuadRef = useRef<Quad | null>(null);
+  // ガイド枠(L3)の追従アニメーション用。target は現在の目標形状(idle/パディング後の
+  // 検出形状)、display は毎フレーム target へ近づけていく実際の表示形状。
+  const guideTargetQuadRef = useRef<Quad | null>(null);
+  const guideDisplayQuadRef = useRef<Quad | null>(null);
+  const guideCornerRefs = useRef<(SVGPathElement | null)[]>([]);
   const containerSizeRef = useRef({ width: STAGE_WIDTH, height: 692 });
 
   useEffect(() => {
@@ -296,10 +299,6 @@ function QrScanner() {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
         }
-        const capabilities = stream.getVideoTracks()[0]?.getCapabilities?.() as
-          | TorchCapabilities
-          | undefined;
-        setTorchSupported(Boolean(capabilities?.torch));
         setCameraReady(true);
       })
       .catch(() => setCameraError(true));
@@ -325,6 +324,47 @@ function QrScanner() {
     return () => observer.disconnect();
   }, []);
 
+  // ガイド枠(L3)の追従アニメーション。CSSの transition は、SVGの d 属性の
+  // 補間に対応していない(または不安定な)ブラウザ(iOS Safari 等)があるため、
+  // 毎フレーム自前で目標(guideTargetQuadRef)へ指数平滑しつつ DOM の d 属性を
+  // 直接書き換える。
+  useEffect(() => {
+    let rafId: number;
+    let lastTime: number | null = null;
+
+    const step = (time: number) => {
+      const target = guideTargetQuadRef.current;
+      if (target) {
+        const dt = lastTime === null ? 0 : (time - lastTime) / 1000;
+        const display = guideDisplayQuadRef.current;
+        const next =
+          !display || dt <= 0
+            ? target
+            : lerpQuad(
+                display,
+                target,
+                1 - Math.exp(-dt / GUIDE_FOLLOW_TAU_SECONDS),
+              );
+        guideDisplayQuadRef.current = next;
+
+        const paths = [
+          cornerPath(next.tl, next.tr, next.bl),
+          cornerPath(next.tr, next.tl, next.br),
+          cornerPath(next.bl, next.br, next.tl),
+          cornerPath(next.br, next.bl, next.tr),
+        ];
+        guideCornerRefs.current.forEach((el, index) => {
+          el?.setAttribute("d", paths[index]);
+        });
+      }
+      lastTime = time;
+      rafId = requestAnimationFrame(step);
+    };
+
+    rafId = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(rafId);
+  }, []);
+
   const reset = () => {
     setPhase("A");
     setCopyFeedback(false);
@@ -333,7 +373,7 @@ function QrScanner() {
     setSnapshotUrl(null);
     setSnapshotBox(null);
     detectedQuadRef.current = null;
-    smoothedQuadRef.current = null;
+    guideDisplayQuadRef.current = null;
     pendingTextRef.current = "";
   };
 
@@ -461,7 +501,7 @@ function QrScanner() {
       ) {
         setPhase("A");
         setDetectedQuad(null);
-        smoothedQuadRef.current = null;
+        guideDisplayQuadRef.current = null;
       }
     }, TIMING.scanIntervalMs);
     return () => clearInterval(interval);
@@ -521,13 +561,7 @@ function QrScanner() {
         containerSize.height,
       );
       detectedQuadRef.current = quad;
-      const smoothed = smoothQuad(
-        smoothedQuadRef.current,
-        quad,
-        GUIDE_SMOOTHING,
-      );
-      smoothedQuadRef.current = smoothed;
-      setDetectedQuad(smoothed);
+      setDetectedQuad(quad);
       setPhase((current) =>
         current === "A" || current === "A2" ? "B" : current,
       );
@@ -586,12 +620,10 @@ function QrScanner() {
     phase === "A" || phase === "A2"
       ? idleQuad
       : (paddedDetectedQuad ?? idleQuad);
-  const guideCornerPaths = [
-    cornerPath(guideQuad.tl, guideQuad.tr, guideQuad.bl),
-    cornerPath(guideQuad.tr, guideQuad.tl, guideQuad.br),
-    cornerPath(guideQuad.bl, guideQuad.br, guideQuad.tl),
-    cornerPath(guideQuad.br, guideQuad.bl, guideQuad.tr),
-  ];
+
+  useEffect(() => {
+    guideTargetQuadRef.current = guideQuad;
+  });
 
   return (
     <div className="qr-scanner" data-phase={phase} ref={containerRef}>
@@ -631,8 +663,14 @@ function QrScanner() {
         height={containerSize.height}
         viewBox={`0 0 ${containerSize.width} ${containerSize.height}`}
       >
-        {guideCornerPaths.map((d, index) => (
-          <path key={index} className="qr-scanner__frame-corner" d={d} />
+        {[0, 1, 2, 3].map((index) => (
+          <path
+            key={index}
+            ref={(el) => {
+              guideCornerRefs.current[index] = el;
+            }}
+            className="qr-scanner__frame-corner"
+          />
         ))}
       </svg>
 
@@ -646,18 +684,16 @@ function QrScanner() {
         </div>
       )}
 
-      {torchSupported && (
-        <button
-          type="button"
-          className="qr-scanner__torch"
-          data-active={torchOn}
-          onClick={handleTorchToggle}
-          aria-pressed={torchOn}
-          aria-label="ライトを切り替える"
-        >
-          <TorchIcon />
-        </button>
-      )}
+      <button
+        type="button"
+        className="qr-scanner__torch"
+        data-active={torchOn}
+        onClick={handleTorchToggle}
+        aria-pressed={torchOn}
+        aria-label="ライトを切り替える"
+      >
+        <TorchIcon />
+      </button>
 
       <div
         className="qr-scanner__sheet"

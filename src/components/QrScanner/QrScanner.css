@@ -97,9 +97,6 @@
   stroke-width: 5;
   stroke-linecap: round;
   stroke-linejoin: round;
-  /* cornerPath() は毎回同じ M→L→L の形状で座標だけが変わるため、
-     ブラウザは d の形状同士を互換とみなして滑らかに補間できる。 */
-  transition: d 160ms ease-out;
 }
 
 /* L4: 案内バナー */
