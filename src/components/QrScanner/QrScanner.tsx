@@ -243,6 +243,7 @@ function QrScanner() {
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraError, setCameraError] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
+  const [torchSupported, setTorchSupported] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [detectedQuad, setDetectedQuad] = useState<Quad | null>(null);
   const [resultText, setResultText] = useState("");
@@ -295,6 +296,10 @@ function QrScanner() {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
         }
+        const capabilities = stream.getVideoTracks()[0]?.getCapabilities?.() as
+          | TorchCapabilities
+          | undefined;
+        setTorchSupported(Boolean(capabilities?.torch));
         setCameraReady(true);
       })
       .catch(() => setCameraError(true));
@@ -641,16 +646,18 @@ function QrScanner() {
         </div>
       )}
 
-      <button
-        type="button"
-        className="qr-scanner__torch"
-        data-active={torchOn}
-        onClick={handleTorchToggle}
-        aria-pressed={torchOn}
-        aria-label="ライトを切り替える"
-      >
-        <TorchIcon />
-      </button>
+      {torchSupported && (
+        <button
+          type="button"
+          className="qr-scanner__torch"
+          data-active={torchOn}
+          onClick={handleTorchToggle}
+          aria-pressed={torchOn}
+          aria-label="ライトを切り替える"
+        >
+          <TorchIcon />
+        </button>
+      )}
 
       <div
         className="qr-scanner__sheet"
