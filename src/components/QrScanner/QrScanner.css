@@ -76,66 +76,30 @@
   pointer-events: none;
 }
 
-/* L3: スキャンガイド枠。left/top は枠の中心座標(コードが傾いている場合、
-   軸並行のバウンディングボックスではなく検出した傾きに合わせて回転させる)。 */
+/* L3: スキャンガイド枠。コンテナ全体を覆う SVG 上に、検出した4隅(台形になりうる)
+   そのものへ沿わせた角ブラケットを描画する(単一の回転矩形による近似はしない)。 */
 .qr-scanner__frame {
   position: absolute;
+  inset: 0;
   z-index: 3;
   opacity: 1;
   pointer-events: none;
-  transform-origin: center;
-  transition:
-    left 160ms ease-out,
-    top 160ms ease-out,
-    width 160ms ease-out,
-    height 160ms ease-out,
-    transform 160ms ease-out,
-    opacity 90ms linear;
+  transition: opacity 90ms linear;
 }
 
 .qr-scanner__frame[data-hidden='true'] {
   opacity: 0;
 }
 
-.qr-scanner__frame .corner {
-  position: absolute;
-  width: 22%;
-  height: 22%;
-  min-width: 18px;
-  min-height: 18px;
-  border: 5px solid rgba(255, 255, 255, 0.9);
-}
-
-.qr-scanner__frame .corner--tl {
-  top: 0;
-  left: 0;
-  border-right: none;
-  border-bottom: none;
-  border-top-left-radius: 8px;
-}
-
-.qr-scanner__frame .corner--tr {
-  top: 0;
-  right: 0;
-  border-left: none;
-  border-bottom: none;
-  border-top-right-radius: 8px;
-}
-
-.qr-scanner__frame .corner--bl {
-  bottom: 0;
-  left: 0;
-  border-right: none;
-  border-top: none;
-  border-bottom-left-radius: 8px;
-}
-
-.qr-scanner__frame .corner--br {
-  bottom: 0;
-  right: 0;
-  border-left: none;
-  border-top: none;
-  border-bottom-right-radius: 8px;
+.qr-scanner__frame-corner {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.9);
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* cornerPath() は毎回同じ M→L→L の形状で座標だけが変わるため、
+     ブラウザは d の形状同士を互換とみなして滑らかに補間できる。 */
+  transition: d 160ms ease-out;
 }
 
 /* L4: 案内バナー */

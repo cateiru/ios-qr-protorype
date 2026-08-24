@@ -16,10 +16,9 @@ interface Quad {
   br: Point;
 }
 
-// 中心座標+サイズ+回転角(ラジアン)で表す、傾き追従可能な矩形。
-// jsQR は検出したコードの4隅の座標(パース変形込み)を返すため、
-// 軸並行のバウンディングボックスではなく回転矩形で扱うことで、
-// コードが傾いているときにガイド枠・固定画像がズレないようにする。
+// 中心座標+サイズ+回転角(ラジアン)で表す矩形。
+// アイドル時(未検出)の固定サイズガイド(FULL_FRAME)専用の表現で、
+// 検出後のガイド枠・固定画像は台形歪みに正確に沿わせるため Quad をそのまま使う。
 interface Frame {
   centerX: number;
   centerY: number;
@@ -63,8 +62,17 @@ const SCAN_MAX_WIDTH = 480;
 // QRコードのクワイエットゾーンを含めて欠けなくキャプチャするための余裕。
 const SNAPSHOT_PADDING_SCALE = 1.0;
 
-// スキャンガイド枠(L3)を検出QRコードの矩形から重心を保ったまま広げる倍率。
-const GUIDE_PADDING_SCALE = 1.1;
+// スキャンガイド枠(L3)を検出QRコードの四隅から重心を保ったまま広げる倍率。
+const GUIDE_PADDING_SCALE = 1.05;
+
+// ガイド枠(L3)の追従を滑らかにする指数移動平均の重み。
+// jsQR の4隅検出はティックごとに微妙にブレるため、そのまま反映すると枠がカクつく。
+// 1に近いほど追従が速く(ブレやすく)、0に近いほど滑らか(遅延大)。
+const GUIDE_SMOOTHING = 0.35;
+
+// ガイド枠(L3)の角ブラケットの長さ(各辺に対する比率、最小px)。
+const GUIDE_CORNER_RATIO = 0.22;
+const GUIDE_CORNER_MIN_LENGTH = 18;
 
 function scaleFrame(frame: Frame, scale: number): Frame {
   return {
@@ -172,25 +180,58 @@ function mapLocationToQuad(
   };
 }
 
-// 検出した4隅(台形になりうる)から、回転を反映した矩形(中心・サイズ・角度)を求める。
-// 上辺・下辺それぞれの長さ・角度を平均することで、多少のパース歪みがあっても
-// 破綻しにくいようにしている(完全な台形変形までは追従しない簡略版)。
-function quadToFrame(quad: Quad): Frame {
-  const { tl, tr, bl, br } = quad;
-  const topVec = { x: tr.x - tl.x, y: tr.y - tl.y };
-  const bottomVec = { x: br.x - bl.x, y: br.y - bl.y };
-  const leftVec = { x: bl.x - tl.x, y: bl.y - tl.y };
-  const rightVec = { x: br.x - tr.x, y: br.y - tr.y };
+// アイドル時の固定サイズガイド(Frame)を、検出時と同じ Quad 表現に変換する。
+function frameToQuad(frame: Frame): Quad {
+  const hw = frame.width / 2;
+  const hh = frame.height / 2;
+  const cos = Math.cos(frame.angle);
+  const sin = Math.sin(frame.angle);
+  const rotate = (dx: number, dy: number): Point => ({
+    x: frame.centerX + dx * cos - dy * sin,
+    y: frame.centerY + dx * sin + dy * cos,
+  });
+  return {
+    tl: rotate(-hw, -hh),
+    tr: rotate(hw, -hh),
+    bl: rotate(-hw, hh),
+    br: rotate(hw, hh),
+  };
+}
 
-  const width =
-    (Math.hypot(topVec.x, topVec.y) + Math.hypot(bottomVec.x, bottomVec.y)) / 2;
-  const height =
-    (Math.hypot(leftVec.x, leftVec.y) + Math.hypot(rightVec.x, rightVec.y)) / 2;
-  const angle = Math.atan2(topVec.y + bottomVec.y, topVec.x + bottomVec.x);
-  const centerX = (tl.x + tr.x + bl.x + br.x) / 4;
-  const centerY = (tl.y + tr.y + bl.y + br.y) / 4;
+function lerpPoint(a: Point, b: Point, alpha: number): Point {
+  return { x: a.x + (b.x - a.x) * alpha, y: a.y + (b.y - a.y) * alpha };
+}
 
-  return { centerX, centerY, width, height, angle };
+// 前回のガイド四隅(prev)から今回の検出(next)へ、頂点ごとに指数移動平均で
+// 滑らかに近づける。角度という単一値を経由しないため、台形のまま
+// (実際のパース歪みに沿ったまま)ジッターだけを抑えられる。
+function smoothQuad(prev: Quad | null, next: Quad, alpha: number): Quad {
+  if (!prev) return next;
+  return {
+    tl: lerpPoint(prev.tl, next.tl, alpha),
+    tr: lerpPoint(prev.tr, next.tr, alpha),
+    bl: lerpPoint(prev.bl, next.bl, alpha),
+    br: lerpPoint(prev.br, next.br, alpha),
+  };
+}
+
+// ガイド枠(L3)の角ブラケット1つ分の SVG パス("V"字)を、頂点から隣接2頂点への
+// 辺に沿って一定の長さ(辺の比率、最小px)だけ伸ばして作る。
+function cornerPath(vertex: Point, alongA: Point, alongB: Point): string {
+  const pointToward = (to: Point): Point => {
+    const dx = to.x - vertex.x;
+    const dy = to.y - vertex.y;
+    const edgeLength = Math.hypot(dx, dy);
+    if (edgeLength === 0) return vertex;
+    const t = Math.min(
+      1,
+      Math.max(GUIDE_CORNER_RATIO, GUIDE_CORNER_MIN_LENGTH / edgeLength),
+    );
+    return { x: vertex.x + dx * t, y: vertex.y + dy * t };
+  };
+  const a = pointToward(alongA);
+  const b = pointToward(alongB);
+  return `M ${a.x} ${a.y} L ${vertex.x} ${vertex.y} L ${b.x} ${b.y}`;
 }
 
 function isUrl(value: string): boolean {
@@ -203,7 +244,7 @@ function QrScanner() {
   const [cameraError, setCameraError] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState(false);
-  const [detectedFrame, setDetectedFrame] = useState<Frame | null>(null);
+  const [detectedQuad, setDetectedQuad] = useState<Quad | null>(null);
   const [resultText, setResultText] = useState("");
   const [containerSize, setContainerSize] = useState({
     width: STAGE_WIDTH,
@@ -224,11 +265,13 @@ function QrScanner() {
   const snapshotCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastSeenAtRef = useRef(0);
   const pendingTextRef = useRef("");
-  const detectedFrameRef = useRef<Frame | null>(null);
-  // captureSnapshot 用に、Frame(回転矩形)に丸める前の生の4隅座標も保持する。
-  // ガイド枠(L3)は Frame で近似したままでよいが、固定画像(L2)は本物の
-  // 台形(パース)歪みに沿わせたいため、丸められていない座標が必要。
+  // captureSnapshot 用に、平滑化・パディング前の生の4隅座標を保持する。
+  // ガイド枠(L3)は平滑化・パディング後の Quad を表示に使うが、
+  // 固定画像(L2)は本物の台形(パース)歪みに正確に沿わせたいため、
+  // ここは加工されていない座標が必要。
   const detectedQuadRef = useRef<Quad | null>(null);
+  // ガイド枠(L3)の平滑化用に直前の(表示用)Quadを保持する。
+  const smoothedQuadRef = useRef<Quad | null>(null);
   const containerSizeRef = useRef({ width: STAGE_WIDTH, height: 692 });
 
   useEffect(() => {
@@ -280,12 +323,12 @@ function QrScanner() {
   const reset = () => {
     setPhase("A");
     setCopyFeedback(false);
-    setDetectedFrame(null);
+    setDetectedQuad(null);
     setResultText("");
     setSnapshotUrl(null);
     setSnapshotBox(null);
-    detectedFrameRef.current = null;
     detectedQuadRef.current = null;
+    smoothedQuadRef.current = null;
     pendingTextRef.current = "";
   };
 
@@ -412,7 +455,8 @@ function QrScanner() {
         TIMING.trackingLossLimit
       ) {
         setPhase("A");
-        setDetectedFrame(null);
+        setDetectedQuad(null);
+        smoothedQuadRef.current = null;
       }
     }, TIMING.scanIntervalMs);
     return () => clearInterval(interval);
@@ -472,9 +516,13 @@ function QrScanner() {
         containerSize.height,
       );
       detectedQuadRef.current = quad;
-      const frame = quadToFrame(quad);
-      detectedFrameRef.current = frame;
-      setDetectedFrame(frame);
+      const smoothed = smoothQuad(
+        smoothedQuadRef.current,
+        quad,
+        GUIDE_SMOOTHING,
+      );
+      smoothedQuadRef.current = smoothed;
+      setDetectedQuad(smoothed);
       setPhase((current) =>
         current === "A" || current === "A2" ? "B" : current,
       );
@@ -522,20 +570,23 @@ function QrScanner() {
   const primaryActionLabel = resultIsUrl ? "サイトを開く" : "Webを検索";
 
   // 状態B以降: jsQR が返すバウンディングボックスは既にQRコード部分のみの
-  // タイトな範囲なので、これ以上縮小せずそのまま使う(縮小すると枠がコードに食い込む)
-  const idleFrame = scaleFrame(FULL_FRAME, stageScale);
-  const paddedDetectedFrame: Frame | null = detectedFrame
-    ? {
-        ...detectedFrame,
-        width: detectedFrame.width * GUIDE_PADDING_SCALE,
-        height: detectedFrame.height * GUIDE_PADDING_SCALE,
-      }
+  // タイトな範囲なので、これ以上縮小せずそのまま使う(縮小すると枠がコードに食い込む)。
+  // ガイド枠(L3)は台形(パース)歪みに正確に沿わせるため、単一の回転矩形ではなく
+  // 検出した4隅そのもの(Quad)を表示に使う。
+  const idleQuad = frameToQuad(scaleFrame(FULL_FRAME, stageScale));
+  const paddedDetectedQuad = detectedQuad
+    ? padQuadFromCentroid(detectedQuad, GUIDE_PADDING_SCALE)
     : null;
-  const frame: Frame =
+  const guideQuad: Quad =
     phase === "A" || phase === "A2"
-      ? idleFrame
-      : (paddedDetectedFrame ?? idleFrame);
-  const frameTransform = `translate(-50%, -50%) rotate(${frame.angle}rad)`;
+      ? idleQuad
+      : (paddedDetectedQuad ?? idleQuad);
+  const guideCornerPaths = [
+    cornerPath(guideQuad.tl, guideQuad.tr, guideQuad.bl),
+    cornerPath(guideQuad.tr, guideQuad.tl, guideQuad.br),
+    cornerPath(guideQuad.bl, guideQuad.br, guideQuad.tl),
+    cornerPath(guideQuad.br, guideQuad.bl, guideQuad.tr),
+  ];
 
   return (
     <div className="qr-scanner" data-phase={phase} ref={containerRef}>
@@ -568,22 +619,17 @@ function QrScanner() {
           />
         )}
 
-      <div
+      <svg
         className="qr-scanner__frame"
         data-hidden={phase === "C"}
-        style={{
-          left: frame.centerX,
-          top: frame.centerY,
-          width: frame.width,
-          height: frame.height,
-          transform: frameTransform,
-        }}
+        width={containerSize.width}
+        height={containerSize.height}
+        viewBox={`0 0 ${containerSize.width} ${containerSize.height}`}
       >
-        <span className="corner corner--tl" />
-        <span className="corner corner--tr" />
-        <span className="corner corner--bl" />
-        <span className="corner corner--br" />
-      </div>
+        {guideCornerPaths.map((d, index) => (
+          <path key={index} className="qr-scanner__frame-corner" d={d} />
+        ))}
+      </svg>
 
       <div className="qr-scanner__banner" data-visible={bannerVisible}>
         スキャンするコードを見つけてください。
